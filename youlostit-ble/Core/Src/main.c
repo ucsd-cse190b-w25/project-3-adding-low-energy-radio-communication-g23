@@ -54,26 +54,25 @@
 	  }
   }
 
-  void SystemClock_DivideFrequency(void) {
-      // save the current AHB, APB1, and APB2 prescaler settings
-      uint32_t temp = RCC->CFGR;
+  void SystemClock_Divider(void)
+    {
+	  uint32_t latency = 0;
+      RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+      RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-      RCC->CFGR &= ~RCC_CFGR_HPRE;
-      RCC->CFGR |= RCC_CFGR_HPRE_DIV4;
+      HAL_RCC_GetClockConfig(&RCC_ClkInitStruct, &latency);
 
-      RCC->CFGR &= ~(RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
-      RCC->CFGR |= (RCC_CFGR_PPRE1_DIV2 | RCC_CFGR_PPRE2_DIV2);
+      RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV4;
+      RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+      RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-      while ((RCC->CFGR & RCC_CFGR_SWS) != (temp & RCC_CFGR_SWS));
-  }
+      HAL_RCC_ClockConfig(&RCC_ClkInitStruct, &latency);
+    }
 
-  void SystemClock_RestoreFrequency(void) {
-      RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
-      RCC->CFGR |= RCC_CFGR_HPRE_DIV1;
-      RCC->CFGR |= (RCC_CFGR_PPRE1_DIV1 | RCC_CFGR_PPRE2_DIV1);
-
-      while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_MSI);
-  }
+  /**
+    * @brief  The application entry point.
+    * @retval int
+    */
 
   int main(void){
     /* Reset peripherals and initialize system */
@@ -133,13 +132,13 @@
 			__HAL_RCC_GPIOD_CLK_DISABLE();
 
 			// Divide the clock frequency
-			SystemClock_DivideFrequency();
+			SystemClock_Divider();
 
     		HAL_SuspendTick();
     		__WFI();
     		HAL_ResumeTick();
 
-    		SystemClock_RestoreFrequency();
+    		SystemClock_Config();
 
      		__HAL_RCC_SPI3_CLK_ENABLE();
      		__HAL_RCC_GPIOA_CLK_ENABLE();
