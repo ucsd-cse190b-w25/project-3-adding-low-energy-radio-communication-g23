@@ -1,4 +1,6 @@
-/* USER CODE BEGIN Header */
+
+
+  /* USER CODE BEGIN Header */
   /**
     ******************************************************************************
     * @file           : main.c
@@ -15,6 +17,7 @@
   #include "ble.h"
   #include "i2c.h"
   #include "lsm6dsl.h"
+  #include "timer.h"
 
   #include <stdlib.h>
   #include <stdint.h>
@@ -23,20 +26,59 @@
   #include <math.h>
 
   int dataAvailable = 0;
+  //int woke_up = 0;
+
   SPI_HandleTypeDef hspi3;
 
   void SystemClock_Config(void);
   static void MX_GPIO_Init(void);
   static void MX_SPI3_Init(void);
 
-  /**
-    * @brief  The application entry point.
-    * @retval int
-    */
+  // Redefine the libc _write() function so you can use printf in your code
+  int _write(int file, char *ptr, int len) {
+      int i = 0;
+      for (i = 0; i < len; i++) {
+          ITM_SendChar(*ptr++);
+      }
+      return len;
+  }
+
+  void TIM2_IRQHandler() {
+	  if(TIM2->SR & TIM_SR_UIF) {
+		  // Flip interrupt flag
+		  timer_reset(TIM2);
+
+		  //woke_up = 1;
+  		  printf("interrupt\n");
+
+	  }
+  }
+
+  void SystemClock_DivideFrequency(void) {
+      // save the current AHB, APB1, and APB2 prescaler settings
+      uint32_t temp = RCC->CFGR;
+
+      RCC->CFGR &= ~RCC_CFGR_HPRE;
+      RCC->CFGR |= RCC_CFGR_HPRE_DIV4;
+
+      RCC->CFGR &= ~(RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
+      RCC->CFGR |= (RCC_CFGR_PPRE1_DIV2 | RCC_CFGR_PPRE2_DIV2);
+
+      while ((RCC->CFGR & RCC_CFGR_SWS) != (temp & RCC_CFGR_SWS));
+  }
+
+  void SystemClock_RestoreFrequency(void) {
+      RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2);
+      RCC->CFGR |= RCC_CFGR_HPRE_DIV1;
+      RCC->CFGR |= (RCC_CFGR_PPRE1_DIV1 | RCC_CFGR_PPRE2_DIV1);
+
+      while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_MSI);
+  }
 
   int main(void){
     /* Reset peripherals and initialize system */
-    HAL_Init();
+
+	HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
     MX_SPI3_Init();
@@ -48,80 +90,132 @@
 
     ble_init();
     HAL_Delay(100);
+	__HAL_RCC_GPIOC_CLK_DISABLE();
+	__HAL_RCC_GPIOE_CLK_DISABLE();
+
 
     /* init I2C and Accelerometer */
     i2c_init();
     lsm6dsl_init();
+	__HAL_RCC_I2C2_CLK_DISABLE();
+
+
+    timer_init(TIM2);
+    timer_set_ms(TIM2, 1000);
+
+    //__HAL_RCC_PWR_CLK_ENABLE(); // enables power clk
+     PWR->CR1 |= PWR_CR1_LPR;
+    //HAL_PWREx_EnableLowPowerRunMode();
 
     HAL_Delay(100);
 
 	/* motion detection vars */
 	int16_t prev_x = 1000000, prev_y = 1000000, prev_z = 1000000;
 	int16_t cur_x, cur_y, cur_z;
-	int lost_timer = -1;  // count when no movement is detected
 	int THRESHOLD = 100;  // noise threshold
 	int discoverable = 1; // 0 means its not discoverable, 1 is discoverable
 	int moving = 1;
+	int lost_timer = -1;  // count when no movement is detected
 
     while(1){
-		catchBLE();
-    	/* condition for init and when movement occurs */
-    	if((discoverable && moving && HAL_GPIO_ReadPin(BLE_INT_GPIO_Port, BLE_INT_Pin)) || moving){
+    	//if(woke_up){
+		//standbyBle();
+		//timer_init(TIM2); // Enable only TIM2 interrupt
+    	// SystemClock_Config();
+    		printf("lost timer %d \n", lost_timer);
 
-			HAL_Delay(100);
-			disconnectBLE(); // disconnect BLE
+    		HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+    		__disable_irq(); // Disable all interrupts
 
-			HAL_Delay(100);
-			setDiscoverability(0); // set to non discoverable
-			HAL_Delay(100);
+    		__HAL_RCC_SPI3_CLK_DISABLE();
+    		__HAL_RCC_GPIOA_CLK_DISABLE();
+    		__HAL_RCC_GPIOB_CLK_DISABLE();
+			__HAL_RCC_GPIOD_CLK_DISABLE();
 
-			discoverable = 0; // update to non discoverable
-			moving = 0; // update to not moving
-		}
+			// Divide the clock frequency
+			SystemClock_DivideFrequency();
 
-    	/* post init: non discoverable or still */
-		else {
-			HAL_Delay(1000);
+    		HAL_SuspendTick();
+    		__WFI();
+    		HAL_ResumeTick();
 
-			lsm6dsl_read_xyz(&cur_x, &cur_y, &cur_z); // read accelerometer values
+    		SystemClock_RestoreFrequency();
 
-			/* condition to check for still */
-			if (abs(cur_x - prev_x) <= THRESHOLD && abs(cur_y - prev_y) <= THRESHOLD && abs(cur_z - prev_z) <= THRESHOLD){
-					 if (lost_timer < 0) {
-							lost_timer = 0;
-					 }
-					 else {
-							lost_timer++; // update seconds still
-					 }
+     		__HAL_RCC_SPI3_CLK_ENABLE();
+     		__HAL_RCC_GPIOA_CLK_ENABLE();
+     		__HAL_RCC_GPIOB_CLK_ENABLE();
+     		__HAL_RCC_GPIOD_CLK_ENABLE();
 
-					 /* lost mode */
-					  if (lost_timer >= 60 && discoverable == 0){
-					    setDiscoverability(1); // set discoverable
-						discoverable = 1; // set discoverable
-						moving = 0; // set not moving
-					  }
+    		__enable_irq(); // Re-enable global interrupts
+    		 HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+    		 HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-					  /* send log for how long it has been lost every 10 sec */
-					  if (discoverable && (lost_timer % 10 == 0)){
-						    char msg[50];
-							snprintf(msg, sizeof(msg), "PrivTag AK has been missing for %d seconds", lost_timer);
-							updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, strlen(msg), (uint8_t*)msg);
+    		catchBLE();
+			/* condition for init and when movement occurs */
+			if((discoverable && moving && HAL_GPIO_ReadPin(BLE_INT_GPIO_Port, BLE_INT_Pin)) || moving){
 
-					  }
+				HAL_Delay(100);
+				disconnectBLE(); // disconnect BLE
+
+				HAL_Delay(100);
+				setDiscoverability(0); // set to non discoverable
+				HAL_Delay(100);
+
+				discoverable = 0; // update to non discoverable
+				moving = 0; // update to not moving
 			}
 
-		    /* airtag moving */
-			else{
-				lost_timer = -1; // reset timer
-				moving = 1; // found
+			/* post init: non discoverable or still */
+			else {
+				//HAL_Delay(1000);
+		  		 printf("counting\n");
+
+		  		//__HAL_RCC_GPIOB_CLK_ENABLE();
+		        __HAL_RCC_I2C2_CLK_ENABLE();
+				lsm6dsl_read_xyz(&cur_x, &cur_y, &cur_z); // read accelerometer values
+	    		__HAL_RCC_I2C2_CLK_DISABLE();
+
+
+				/* condition to check for still */
+				if (abs(cur_x - prev_x) <= THRESHOLD && abs(cur_y - prev_y) <= THRESHOLD && abs(cur_z - prev_z) <= THRESHOLD){
+						 if (lost_timer < 0) {
+								lost_timer = 0;
+						 }
+						 else {
+								lost_timer++; // update seconds still
+						 }
+
+						 /* lost mode */
+						  if (lost_timer >= 30 && discoverable == 0){
+							setDiscoverability(1); // set discoverable
+							discoverable = 1; // set discoverable
+							moving = 0; // set not moving
+						  }
+
+						  /* send log for how long it has been lost every 10 sec */
+						  if (discoverable && (lost_timer % 10 == 0)){
+					  		  printf("lost for %d \n", lost_timer);
+							  //char msg[50];
+							  //snprintf(msg, sizeof(msg), "PrivTag AK has been missing for %d seconds", lost_timer);
+							  //updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, strlen(msg), (uint8_t*)msg);
+						  }
+				}
+
+				/* airtag moving */
+				else{
+					lost_timer = -1; // reset timer
+					moving = 1; // found
+				}
+
+				/* update accelerometer vals */
+				prev_x = cur_x;
+				prev_y = cur_y;
+				prev_z = cur_z;
+
 			}
 
-			/* update accelerometer vals */
-			prev_x = cur_x;
-			prev_y = cur_y;
-			prev_z = cur_z;
-
-		}
+			//woke_up = 0;
+    	//}
      }
   }
 
@@ -149,7 +243,7 @@
     RCC_OscInitStruct.MSIState = RCC_MSI_ON;
     RCC_OscInitStruct.MSICalibrationValue = 0;
     // This lines changes system clock frequency
-    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_7;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_7; // 7 to 5
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
     {
